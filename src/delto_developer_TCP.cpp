@@ -36,6 +36,10 @@ namespace DeltoTCP {
 
 int Communication::GetMotorCount(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return 3;
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return 6;
     case static_cast<uint16_t>(ModelType::DG3F_B):
     case static_cast<uint16_t>(ModelType::DG3F_M):
       return 12;
@@ -44,7 +48,12 @@ int Communication::GetMotorCount(uint16_t model) {
     case static_cast<uint16_t>(ModelType::DG5F):
     case static_cast<uint16_t>(ModelType::DG5F_L):
     case static_cast<uint16_t>(ModelType::DG5F_R):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
       return 20;
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
+      return 15;
     default:
       std::cerr << "Unknown model type: 0x" << std::hex << model << std::dec
                 << std::endl;
@@ -66,6 +75,10 @@ int Communication::GetBytePerMotor(uint16_t model) {
 
 int Communication::GetFingerCount(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return 1;
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return 2;
     case static_cast<uint16_t>(ModelType::DG3F_B):
     case static_cast<uint16_t>(ModelType::DG3F_M):
       return 3;
@@ -74,6 +87,10 @@ int Communication::GetFingerCount(uint16_t model) {
     case static_cast<uint16_t>(ModelType::DG5F):
     case static_cast<uint16_t>(ModelType::DG5F_L):
     case static_cast<uint16_t>(ModelType::DG5F_R):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
       return 5;
     default:
       return 5;
@@ -85,20 +102,37 @@ bool Communication::IsNewModel() const {
 }
 
 bool Communication::SupportsExtendedFeatures() const {
-  // New models (DG3F-M, DG4F, DG5F) support extended features
-  return model_ == static_cast<uint16_t>(ModelType::DG3F_M) ||
-         model_ == static_cast<uint16_t>(ModelType::DG4F) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F_L) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F_R);
+  return model_ != static_cast<uint16_t>(ModelType::DG3F_B);
+}
+
+int Communication::GetSensorBytesPerFinger() const {
+  switch (sensor_type_) {
+    case SensorType::FT_6AXIS:  return 12;  // 6 axes × 2 bytes
+    case SensorType::FT_3AXIS:  return 12;  // 6 axes × 2 bytes (3 unused)
+    case SensorType::FT_4AXIS:  return 12;  // 6 axes × 2 bytes (2 unused)
+    case SensorType::TACTILE_M: return 15;  // 3×5 × 1 byte
+    case SensorType::TACTILE_S: return 36;  // 3×6 × 2 bytes
+    default:                    return 0;
+  }
+}
+
+int Communication::GetSensorFingerCount() const {
+  int count = 0;
+  for (int i = 0; i < finger_count_; i++) {
+    if (finger_sensor_mask_ & (1 << i)) {
+      count++;
+    }
+  }
+  return count;
 }
 
 int16_t Communication::CalculateExpectedResponseLength() {
   int16_t length = HEADER_SIZE + motor_count_ * byte_per_motor_;
 
   if (SupportsExtendedFeatures()) {
-    if (fingertip_sensor_) {
-      length += 2 * 6 * finger_count_;  // 2 bytes × 6 axes × N fingers
+    if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+      int sensor_fingers = GetSensorFingerCount();
+      length += GetSensorBytesPerFinger() * sensor_fingers;
     }
     if (io_) {
       length += GPIO_SIZE;
@@ -132,14 +166,20 @@ Communication::Communication(const std::string& ip, int port, uint16_t model,
       actual_model_(0),
       fingertip_sensor_(fingertip_sensor),
       io_(io),
+      sensor_type_(SensorType::NONE),
+      finger_sensor_mask_(0),
       socket_(io_context_),
       motor_count_(GetMotorCount(model)),
       byte_per_motor_(GetBytePerMotor(model)),
       finger_count_(GetFingerCount(model)),
-      expected_response_length_(CalculateExpectedResponseLength()) {}
+      expected_response_length_(0) {}
 
 std::string Communication::ModelToString(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return "DG1F (0x1F02)";
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return "DG2F (0x2F03)";
     case static_cast<uint16_t>(ModelType::DG3F_B):
       return "DG3F-B (0x3F01)";
     case static_cast<uint16_t>(ModelType::DG3F_M):
@@ -152,8 +192,16 @@ std::string Communication::ModelToString(uint16_t model) {
       return "DG5F-L (0x5F12)";
     case static_cast<uint16_t>(ModelType::DG5F_R):
       return "DG5F-R (0x5F22)";
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+      return "DG5F-L-S (0x5F14)";
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
+      return "DG5F-R-S (0x5F24)";
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+      return "DG5F-L-S15 (0x5F34)";
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
+      return "DG5F-R-S15 (0x5F44)";
     default:
-      return "Unknown (0x" + 
+      return "Unknown (0x" +
              ([](uint16_t v) {
                char buf[8];
                snprintf(buf, sizeof(buf), "%04X", v);
@@ -189,8 +237,9 @@ void Communication::Connect() {
     throw std::runtime_error("Connection failed: " + ec.message());
   }
 
-  // Get firmware version and model info (single request)
-  // Response format: Length(2) + CMD(1) + Model(2) + Version(2) = 7 bytes
+  // Get firmware version and model info
+  // Old firmware: 7 bytes (Length=7, no sensor info)
+  // New firmware: 9 bytes (Length=9, includes SensorType + FingerMask)
   {
     std::array<uint8_t, 3> request;
     request[0] = 0x00;              // Length_h
@@ -204,20 +253,46 @@ void Communication::Connect() {
       throw std::runtime_error("Failed to get device info: " + ec.message());
     }
 
-    std::vector<uint8_t> response(7);
-    boost::asio::read(socket_, boost::asio::buffer(response),
-                      boost::asio::transfer_exactly(7), ec);
+    // Read length field first (2 bytes)
+    std::array<uint8_t, 2> len_buf;
+    boost::asio::read(socket_, boost::asio::buffer(len_buf),
+                      boost::asio::transfer_exactly(2), ec);
+    if (ec) {
+      std::cerr << "Error reading version length: " << ec.message()
+                << std::endl;
+      throw std::runtime_error("Failed to read device info: " + ec.message());
+    }
+
+    uint16_t resp_length = (static_cast<uint16_t>(len_buf[0]) << 8) | len_buf[1];
+    uint16_t remaining = resp_length - 2;  // Length includes the 2-byte length field
+
+    std::vector<uint8_t> payload(remaining);
+    boost::asio::read(socket_, boost::asio::buffer(payload),
+                      boost::asio::transfer_exactly(remaining), ec);
     if (ec) {
       std::cerr << "Error reading version response: " << ec.message()
                 << std::endl;
       throw std::runtime_error("Failed to read device info: " + ec.message());
     }
 
-    // Parse model ID (bytes 3-4, Big Endian)
-    actual_model_ = CombineMsg(response[3], response[4]);
+    // payload[0] = CMD (0x08)
+    // payload[1-2] = Model (Big Endian)
+    // payload[3-4] = FW Version
+    // payload[5] = SensorType (if resp_length >= 9)
+    // payload[6] = FingerMask (if resp_length >= 9)
 
-    // Parse firmware version (bytes 5-6)
-    firmware_version_ = {response[5], response[6]};
+    actual_model_ = CombineMsg(payload[1], payload[2]);
+    firmware_version_ = {payload[3], payload[4]};
+
+    if (resp_length >= 9) {
+      sensor_type_ = static_cast<SensorType>(payload[5]);
+      finger_sensor_mask_ = payload[6];
+    } else {
+      // Old firmware: use parameter-based defaults
+      sensor_type_ = fingertip_sensor_ ? SensorType::FT_6AXIS : SensorType::NONE;
+      finger_sensor_mask_ = fingertip_sensor_ ?
+          static_cast<uint8_t>((1 << finger_count_) - 1) : 0x00;
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << "Device Info:" << std::endl;
@@ -226,6 +301,13 @@ void Communication::Connect() {
               << static_cast<int>(firmware_version_[1]) << std::endl;
     std::cout << "  Configured Model: " << ModelToString(model_) << std::endl;
     std::cout << "  Actual Model:     " << ModelToString(actual_model_) << std::endl;
+
+    if (resp_length >= 9) {
+      std::cout << "  Sensor Type:      0x" << std::hex
+                << static_cast<int>(payload[5]) << std::dec << std::endl;
+      std::cout << "  Finger Mask:      0x" << std::hex
+                << static_cast<int>(finger_sensor_mask_) << std::dec << std::endl;
+    }
 
     // Validate model
     if (model_ != actual_model_) {
@@ -240,6 +322,9 @@ void Communication::Connect() {
     }
     std::cout << "========================================" << std::endl;
   }
+
+  // Calculate expected response length now that sensor info is known
+  expected_response_length_ = CalculateExpectedResponseLength();
 
   std::cout << "Connected to Delto Gripper (Model: " << ModelToString(actual_model_)
             << ", Motors: " << motor_count_ << ")" << std::endl;
@@ -386,34 +471,77 @@ DeltoReceivedData Communication::GetData() {
     }
   }
 
-  // Parse fingertip sensor data (model-specific finger count)
-  if (SupportsExtendedFeatures() && fingertip_sensor_) {
-    size_t ft_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
-    received_data.fingertip_sensor.resize(finger_count_ * 6);  // N fingers × 6 axes
+  // Parse sensor data (type depends on GET_VERSION response)
+  if (SupportsExtendedFeatures() && fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+    size_t sensor_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
+    int bytes_per_finger = GetSensorBytesPerFinger();
 
-    for (int finger = 0; finger < finger_count_; finger++) {
-      for (int axis = 0; axis < 6; axis++) {
-        size_t offset = ft_base + (finger * 6 + axis) * 2;
-        uint8_t dataL = response[offset];
-        uint8_t dataH = response[offset + 1];
-        int16_t raw_value = CombineMsg(dataL, dataH);
+    switch (sensor_type_) {
+      case SensorType::FT_6AXIS:
+      case SensorType::FT_3AXIS:
+      case SensorType::FT_4AXIS: {
+        // F/T sensor: 12 bytes/finger (6 axes × 2 bytes)
+        int sensor_fingers = GetSensorFingerCount();
+        received_data.fingertip_sensor.resize(sensor_fingers * 6);
 
-        if (axis < 3) {
-          // Force (Fx, Fy, Fz): 0.1 N → N
-          received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
-        } else {
-          // Torque (Tx, Ty, Tz): 1 mNm → Nm
-          received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.001;
+        int fi = 0;
+        for (int finger = 0; finger < finger_count_; finger++) {
+          if (!(finger_sensor_mask_ & (1 << finger))) continue;
+          for (int axis = 0; axis < 6; axis++) {
+            size_t offset = sensor_base + fi * bytes_per_finger + axis * 2;
+            int16_t raw_value = CombineMsg(response[offset], response[offset + 1]);
+
+            if (axis < 3) {
+              received_data.fingertip_sensor[fi * 6 + axis] = raw_value * 0.1;
+            } else {
+              received_data.fingertip_sensor[fi * 6 + axis] = raw_value * 0.001;
+            }
+          }
+          fi++;
         }
+        break;
       }
+      case SensorType::TACTILE_M: {
+        // Tactile M: 15 bytes/finger (3×5, uint8)
+        int fi = 0;
+        for (int finger = 0; finger < finger_count_; finger++) {
+          if (!(finger_sensor_mask_ & (1 << finger))) continue;
+          std::vector<uint8_t> cells(15);
+          size_t offset = sensor_base + fi * bytes_per_finger;
+          for (int j = 0; j < 15; j++) {
+            cells[j] = response[offset + j];
+          }
+          received_data.tactile_m.push_back(std::move(cells));
+          fi++;
+        }
+        break;
+      }
+      case SensorType::TACTILE_S: {
+        // Tactile S: 36 bytes/finger (3×6, uint16 Big-Endian)
+        int fi = 0;
+        for (int finger = 0; finger < finger_count_; finger++) {
+          if (!(finger_sensor_mask_ & (1 << finger))) continue;
+          std::vector<uint16_t> cells(18);
+          size_t offset = sensor_base + fi * bytes_per_finger;
+          for (int j = 0; j < 18; j++) {
+            cells[j] = (static_cast<uint16_t>(response[offset + j * 2]) << 8) |
+                        response[offset + j * 2 + 1];
+          }
+          received_data.tactile_s.push_back(std::move(cells));
+          fi++;
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
 
   // Parse GPIO data (only for models with GPIO enabled)
   if (SupportsExtendedFeatures() && io_) {
     size_t gpio_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
-    if (fingertip_sensor_) {
-      gpio_base += 2 * 6 * finger_count_;  // 2 bytes × 6 axes × N fingers
+    if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+      gpio_base += GetSensorBytesPerFinger() * GetSensorFingerCount();
     }
 
     received_data.gpio.resize(4);
