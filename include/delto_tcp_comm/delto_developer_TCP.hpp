@@ -41,12 +41,27 @@ namespace DeltoTCP {
 // Model IDs
 // ============================================================================
 enum class ModelType : uint16_t {
-  DG3F_B = 0x3F01,   // DG-3F B (구형, 5바이트/모터)
-  DG3F_M = 0x3F02,   // DG-3F M (신형, 8바이트/모터)
-  DG4F   = 0x4F02,   // DG-4F
-  DG5F   = 0x5F02,   // DG-5F
-  DG5F_L = 0x5F12,   // DG-5F LEFT
-  DG5F_R = 0x5F22,   // DG-5F RIGHT
+  DG1F      = 0x1F02,   // DG-1F
+  DG2F      = 0x2F03,   // DG-2F
+  DG3F_B    = 0x3F01,   // DG-3F B (구형, 5바이트/모터)
+  DG3F_M    = 0x3F02,   // DG-3F M (신형, 8바이트/모터)
+  DG4F      = 0x4F02,   // DG-4F
+  DG5F      = 0x5F02,   // DG-5F
+  DG5F_L    = 0x5F12,   // DG-5F LEFT
+  DG5F_R    = 0x5F22,   // DG-5F RIGHT
+  DG5F_L_S  = 0x5F14,   // DG-5F LEFT S
+  DG5F_R_S  = 0x5F24,   // DG-5F RIGHT S
+  DG5F_L_S15 = 0x5F34,  // DG-5F LEFT S15
+  DG5F_R_S15 = 0x5F44,  // DG-5F RIGHT S15
+};
+
+enum class SensorType : uint8_t {
+  NONE      = 0x00,
+  FT_6AXIS  = 0x01,   // 6 Axis Force/Torque, 12byte/finger
+  FT_3AXIS  = 0x02,   // 3 Axis (x,y,z, nc, nc, nc),  12byte/finger
+  TACTILE_M = 0x03,   // 3x5, 1byte/cell, 15byte/finger
+  FT_4AXIS  = 0x04,   // 4 Axis (x,y,z, nc, nc, rz), 12byte/finger 
+  TACTILE_S = 0x05,   // 3x6, 2byte/cell, 36byte/finger
 };
 
 // ============================================================================
@@ -58,7 +73,9 @@ struct DeltoReceivedData {
   std::vector<double> temperature;       // Celsius
   std::vector<double> velocity;          // rad/s
   std::vector<bool> gpio;                // GPIO states (4 elements)
-  std::vector<double> fingertip_sensor;  // F/T sensor data (N fingers × 6 axes: 3F=18, 4F=24, 5F=30)
+  std::vector<double> fingertip_sensor;  // F/T sensor data (N fingers × 6 axes)
+  std::vector<std::vector<uint8_t>> tactile_m;   // Tactile M: per finger, 3x5=15 bytes (uint8)
+  std::vector<std::vector<uint16_t>> tactile_s;  // Tactile S: per finger, 3x6=18 values (uint16)
 };
 
 // ============================================================================
@@ -72,7 +89,7 @@ class Communication {
   /**
    * @brief Constructor
    * @param ip IP address of the Delto gripper
-   * @param port TCP port (default: 10000)
+   * @param port TCP port
    * @param model Model ID (see ModelType enum)
    * @param fingertip_sensor Enable fingertip F/T sensor (only DG5F)
    * @param io Enable GPIO (only DG5F)
@@ -98,11 +115,16 @@ class Communication {
 
   // Version info
   std::vector<uint8_t> GetFirmwareVersion();
-  
+
   // Model info
   uint16_t GetActualModel() const { return actual_model_; }
   uint16_t GetConfiguredModel() const { return model_; }
   static std::string ModelToString(uint16_t model);
+
+  // Sensor info (available after Connect, from GET_VERSION response)
+  SensorType GetSensorType() const { return sensor_type_; }
+  uint8_t GetFingerSensorMask() const { return finger_sensor_mask_; }
+  int GetSensorFingerCount() const;
 
  private:
   // Connection parameters
@@ -112,6 +134,8 @@ class Communication {
   uint16_t actual_model_;    // Actual model (read from device)
   bool fingertip_sensor_;
   bool io_;
+  SensorType sensor_type_;         // From GET_VERSION (0x00 if old firmware)
+  uint8_t finger_sensor_mask_;     // From GET_VERSION (0x00 if old firmware)
 
   // Network
   asio::io_context io_context_;
@@ -122,7 +146,7 @@ class Communication {
   const int motor_count_;
   const int byte_per_motor_;
   const int finger_count_;
-  const int16_t expected_response_length_;
+  int16_t expected_response_length_;
 
   // Protocol constants
   static constexpr uint8_t GET_DATA_CMD = 0x01;
@@ -143,6 +167,7 @@ class Communication {
   int GetMotorCount(uint16_t model);
   int GetBytePerMotor(uint16_t model);
   int GetFingerCount(uint16_t model);
+  int GetSensorBytesPerFinger() const;
   int16_t CalculateExpectedResponseLength();
   bool ReadFullPacket(std::vector<uint8_t>& buffer);
   int16_t CombineMsg(uint8_t data1, uint8_t data2);

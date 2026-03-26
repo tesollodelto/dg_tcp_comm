@@ -11,15 +11,15 @@ A unified TCP communication library for DELTO grippers (DG-3F, DG-4F, DG-5F).
 | Model ID | Model Name | Motors | Bytes/Motor | GPIO | Sensor |
 |----------|------------|--------|-------------|------|--------|
 | 0x3F01 | DG-3F B | 12 | 5 | Yes | -- |
-| 0x3F02 | DG-3F M | 12 | 8 | Yes | F/T |
-| 0x4F02 | DG-4F | 18 | 8 | Yes | F/T |
-| 0x5F02 | DG-5F | 20 | 8 | Yes | F/T |
-| 0x5F12 | DG-5F Left | 20 | 8 | Yes | F/T |
-| 0x5F22 | DG-5F Right | 20 | 8 | Yes | F/T |
-| 0x5F14 | DG-5F-S Left | 20 | 8 | Yes | F/T |
-| 0x5F24 | DG-5F-S Right | 20 | 8 | Yes | F/T |
-| 0x5F34 | DG-5F-S15 Left | 15 | 8 | Yes | F/T |
-| 0x5F44 | DG-5F-S15 Right | 15 | 8 | Yes | F/T |
+| 0x3F02 | DG-3F M | 12 | 8 | Yes | F/T, TACTILE_M |
+| 0x4F02 | DG-4F | 18 | 8 | Yes | F/T,TACTILE_M|
+| 0x5F02 | DG-5F | 20 | 8 | Yes | F/T,TACTILE_M |
+| 0x5F12 | DG-5F Left | 20 | 8 | Yes | F/T, TACTILE_M |
+| 0x5F22 | DG-5F Right | 20 | 8 | Yes | F/T, TACTILE_M |
+| 0x5F14 | DG-5F-S Left | 20 | 8 | Yes | F/T, TACTILE_S |
+| 0x5F24 | DG-5F-S Right | 20 | 8 | Yes | F/T,TACTILE_S |
+| 0x5F34 | DG-5F-S15 Left | 15 | 8 | Yes | --  |
+| 0x5F44 | DG-5F-S15 Right | 15 | 8 | Yes | --  |
 
 ## Sensor Types
 
