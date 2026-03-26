@@ -8,14 +8,31 @@ A unified TCP communication library for DELTO grippers (DG-3F, DG-4F, DG-5F).
 
 ## Supported Models
 
-| Model ID | Model Name | Motors | Bytes/Motor | GPIO | F/T Sensor |
-|----------|------------|--------|-------------|------|------------|
-| 0x3F01 | DG-3F B  | 12 | 5 | ✅ | ❌ |
-| 0x3F02 | DG-3F M | 12 | 8 | ✅ | ✅ |
-| 0x4F02 | DG-4F | 18 | 8 | ✅ | ✅ |
-| 0x5F02 | DG-5F | 20 | 8 | ✅ | ✅ |
-| 0x5F12 | DG-5F Left | 20 | 8 | ✅ | ✅ |
-| 0x5F22 | DG-5F Right | 20 | 8 | ✅ | ✅ |
+| Model ID | Model Name | Motors | Bytes/Motor | GPIO | Sensor |
+|----------|------------|--------|-------------|------|--------|
+| 0x3F01 | DG-3F B | 12 | 5 | Yes | -- |
+| 0x3F02 | DG-3F M | 12 | 8 | Yes | F/T |
+| 0x4F02 | DG-4F | 18 | 8 | Yes | F/T |
+| 0x5F02 | DG-5F | 20 | 8 | Yes | F/T |
+| 0x5F12 | DG-5F Left | 20 | 8 | Yes | F/T |
+| 0x5F22 | DG-5F Right | 20 | 8 | Yes | F/T |
+| 0x5F14 | DG-5F-S Left | 20 | 8 | Yes | F/T |
+| 0x5F24 | DG-5F-S Right | 20 | 8 | Yes | F/T |
+| 0x5F34 | DG-5F-S15 Left | 15 | 8 | Yes | F/T |
+| 0x5F44 | DG-5F-S15 Right | 15 | 8 | Yes | F/T |
+
+## Sensor Types
+
+The sensor type is auto-detected from firmware via `GET_VERSION`:
+
+| Type | Value | Description | Data per finger |
+|------|-------|-------------|-----------------|
+| `NONE` | 0x00 | No sensor | -- |
+| `FT_6AXIS` | 0x01 | 6-axis force/torque | 12 bytes |
+| `FT_3AXIS` | 0x02 | 3-axis force/torque | 12 bytes |
+| `TACTILE_M` | 0x03 | Tactile matrix 3x5 | 15 bytes (uint8) |
+| `FT_4AXIS` | 0x04 | 4-axis force/torque | 12 bytes |
+| `TACTILE_S` | 0x05 | Tactile matrix 3x6 | 36 bytes (uint16) |
 
 ## Usage
 
@@ -81,10 +98,16 @@ target_link_libraries(your_target
 | 1-2 | 2 | Position (0.1°) |
 | 3-4 | 2 | Current (mA) |
 
-### F/T Sensor Data (60 bytes)
-- 5 fingers × 6 axes × 2 bytes
+### F/T Sensor Data (12 bytes/finger)
+- 6 axes x 2 bytes per finger
 - Force (Fx, Fy, Fz): 0.1 N units
 - Torque (Tx, Ty, Tz): 1 mNm units
+
+### Tactile M Data (15 bytes/finger)
+- 3x5 grid, 1 byte per cell (uint8)
+
+### Tactile S Data (36 bytes/finger)
+- 3x6 grid, 2 bytes per cell (uint16)
 
 ### GPIO Data (4 bytes)
 - Output 1-3, Input 1
