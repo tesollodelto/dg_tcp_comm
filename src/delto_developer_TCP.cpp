@@ -28,6 +28,17 @@
 
 #include "delto_tcp_comm/delto_developer_TCP.hpp"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <poll.h>
+#include <cerrno>
+#include <cstring>
+#include <chrono>
+#include <stdexcept>
+
 namespace DeltoTCP {
 
 // ============================================================================
@@ -62,14 +73,9 @@ int Communication::GetMotorCount(uint16_t model) {
 }
 
 int Communication::GetBytePerMotor(uint16_t model) {
-  // DG3F-B (구형): 5 bytes per motor
-  // ID(1) + PosL(1) + PosH(1) + CurL(1) + CurH(1)
   if (model == static_cast<uint16_t>(ModelType::DG3F_B)) {
     return 5;
   }
-
-  // 신형 모델들: 8 bytes per motor
-  // ID(1) + PosL(1) + PosH(1) + CurL(1) + CurH(1) + TempL(1) + TempH(1) + Vel(1)
   return 8;
 }
 
@@ -107,17 +113,17 @@ bool Communication::SupportsExtendedFeatures() const {
 
 int Communication::GetSensorBytesPerFinger() const {
   switch (sensor_type_) {
-    case SensorType::FT_6AXIS:  return 12;  // 6 axes × 2 bytes
-    case SensorType::FT_3AXIS:  return 12;  // 6 axes × 2 bytes (3 unused)
-    case SensorType::FT_4AXIS:  return 12;  // 6 axes × 2 bytes (2 unused)
-    case SensorType::TACTILE_M: return 15;  // 3×5 × 1 byte
-    case SensorType::TACTILE_S: return 36;  // 3×6 × 2 bytes
+    case SensorType::FT_6AXIS:  return 12;
+    case SensorType::FT_3AXIS:  return 12;
+    case SensorType::FT_4AXIS:  return 12;
+    case SensorType::TACTILE_M: return 15;
+    case SensorType::TACTILE_S: return 36;
     default:                    return 0;
   }
 }
 
 int Communication::GetSensorFingerCount() const {
-  return finger_count_;  // 전체 손가락 슬롯 전송 (비활성은 0)
+  return finger_count_;
 }
 
 int16_t Communication::CalculateExpectedResponseLength() {
@@ -137,7 +143,6 @@ int16_t Communication::CalculateExpectedResponseLength() {
 }
 
 int16_t Communication::CombineMsg(uint8_t data1, uint8_t data2) {
-  // Big Endian: data1 = high byte, data2 = low byte
   return static_cast<int16_t>(static_cast<uint16_t>(data1 << 8) | data2);
 }
 
@@ -146,6 +151,67 @@ int8_t Communication::ConvertByte(uint8_t byte) {
     return static_cast<int8_t>(byte - 0x100);
   }
   return static_cast<int8_t>(byte);
+}
+
+// ============================================================================
+// Low-level I/O
+// ============================================================================
+
+bool Communication::SendAll(const uint8_t* data, std::size_t len) {
+  std::size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = ::send(sockfd_, data + sent, len - sent, MSG_NOSIGNAL);
+    if (n <= 0) {
+      std::cerr << "Send error: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+    sent += static_cast<std::size_t>(n);
+  }
+  return true;
+}
+
+bool Communication::RecvAll(uint8_t* data, std::size_t len, int timeout_ms) {
+  std::size_t received = 0;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(timeout_ms);
+
+  while (received < len) {
+    int remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (remaining_ms <= 0) {
+      std::cerr << "Read timeout: got " << received << "/" << len
+                << " bytes" << std::endl;
+      return false;
+    }
+
+    struct pollfd pfd;
+    pfd.fd = sockfd_;
+    pfd.events = POLLIN;
+
+    int ret = ::poll(&pfd, 1, remaining_ms);
+    if (ret < 0) {
+      std::cerr << "Poll error: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+    if (ret == 0) {
+      std::cerr << "Read timeout: got " << received << "/" << len
+                << " bytes" << std::endl;
+      return false;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      std::cerr << "Socket error during poll" << std::endl;
+      return false;
+    }
+
+    ssize_t n = ::recv(sockfd_, data + received, len - received, 0);
+    if (n <= 0) {
+      std::cerr << "Read error: " << (n == 0 ? "Connection closed" :
+                    std::strerror(errno)) << std::endl;
+      return false;
+    }
+    received += static_cast<std::size_t>(n);
+  }
+  return true;
 }
 
 // ============================================================================
@@ -162,11 +228,15 @@ Communication::Communication(const std::string& ip, int port, uint16_t model,
       io_(io),
       sensor_type_(SensorType::NONE),
       finger_sensor_mask_(0),
-      socket_(io_context_),
+      sockfd_(-1),
       motor_count_(GetMotorCount(model)),
       byte_per_motor_(GetBytePerMotor(model)),
       finger_count_(GetFingerCount(model)),
       expected_response_length_(0) {}
+
+Communication::~Communication() {
+  Disconnect();
+}
 
 std::string Communication::ModelToString(uint16_t model) {
   switch (model) {
@@ -204,76 +274,76 @@ std::string Communication::ModelToString(uint16_t model) {
   }
 }
 
-Communication::~Communication() {
-  if (socket_.is_open()) {
-    socket_.close();
-  }
-}
-
 // ============================================================================
 // Connection Management
 // ============================================================================
 
 void Communication::Connect() {
-  tcp::resolver resolver(io_context_);
-  boost::system::error_code ec;
+  // Close existing socket
+  Disconnect();
 
-  // Ensure socket is closed before attempting to connect
-  if (socket_.is_open()) {
-    socket_.close();
+  sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd_ < 0) {
+    throw std::runtime_error("Failed to create socket: " +
+                             std::string(std::strerror(errno)));
   }
 
-  boost::asio::connect(socket_, resolver.resolve(ip_, std::to_string(port_)),
-                       ec);
-
-  if (ec) {
-    std::cerr << "Could not connect: " << ec.message() << std::endl;
-    throw std::runtime_error("Connection failed: " + ec.message());
+  struct sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port_));
+  if (::inet_pton(AF_INET, ip_.c_str(), &addr.sin_addr) <= 0) {
+    ::close(sockfd_);
+    sockfd_ = -1;
+    throw std::runtime_error("Invalid IP address: " + ip_);
   }
+
+  if (::connect(sockfd_, reinterpret_cast<struct sockaddr*>(&addr),
+                sizeof(addr)) < 0) {
+    ::close(sockfd_);
+    sockfd_ = -1;
+    throw std::runtime_error("Connection failed to " + ip_ + ":" +
+                             std::to_string(port_) + ": " +
+                             std::strerror(errno));
+  }
+
+  // TCP keepalive for cable-disconnect detection
+  int keepalive = 1;
+  setsockopt(sockfd_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+  int keepidle = 1;
+  int keepintvl = 1;
+  int keepcnt = 3;
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+
+  // Disable Nagle's algorithm for low-latency
+  int nodelay = 1;
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
   // Get firmware version and model info
-  // Old firmware: 7 bytes (Length=7, no sensor info)
-  // New firmware: 9 bytes (Length=9, includes SensorType + FingerMask)
   {
-    std::array<uint8_t, 3> request;
-    request[0] = 0x00;              // Length_h
-    request[1] = 0x03;              // Length_l
-    request[2] = GET_VERSION_CMD;   // CMD
-
-    socket_.write_some(boost::asio::buffer(request), ec);
-    if (ec) {
-      std::cerr << "Error sending version request: " << ec.message()
-                << std::endl;
-      throw std::runtime_error("Failed to get device info: " + ec.message());
+    uint8_t request[3] = {0x00, 0x03, GET_VERSION_CMD};
+    if (!SendAll(request, 3)) {
+      Disconnect();
+      throw std::runtime_error("Failed to send version request");
     }
 
-    // Read length field first (2 bytes)
-    std::array<uint8_t, 2> len_buf;
-    boost::asio::read(socket_, boost::asio::buffer(len_buf),
-                      boost::asio::transfer_exactly(2), ec);
-    if (ec) {
-      std::cerr << "Error reading version length: " << ec.message()
-                << std::endl;
-      throw std::runtime_error("Failed to read device info: " + ec.message());
+    // Read length field (2 bytes)
+    uint8_t len_buf[2];
+    if (!RecvAll(len_buf, 2, 3000)) {
+      Disconnect();
+      throw std::runtime_error("Failed to read device info");
     }
 
     uint16_t resp_length = (static_cast<uint16_t>(len_buf[0]) << 8) | len_buf[1];
-    uint16_t remaining = resp_length - 2;  // Length includes the 2-byte length field
+    uint16_t remaining = resp_length - 2;
 
     std::vector<uint8_t> payload(remaining);
-    boost::asio::read(socket_, boost::asio::buffer(payload),
-                      boost::asio::transfer_exactly(remaining), ec);
-    if (ec) {
-      std::cerr << "Error reading version response: " << ec.message()
-                << std::endl;
-      throw std::runtime_error("Failed to read device info: " + ec.message());
+    if (!RecvAll(payload.data(), remaining, 3000)) {
+      Disconnect();
+      throw std::runtime_error("Failed to read device info payload");
     }
-
-    // payload[0] = CMD (0x08)
-    // payload[1-2] = Model (Big Endian)
-    // payload[3-4] = FW Version
-    // payload[5] = SensorType (if resp_length >= 9)
-    // payload[6] = FingerMask (if resp_length >= 9)
 
     actual_model_ = CombineMsg(payload[1], payload[2]);
     firmware_version_ = {payload[3], payload[4]};
@@ -282,7 +352,6 @@ void Communication::Connect() {
       sensor_type_ = static_cast<SensorType>(payload[5]);
       finger_sensor_mask_ = payload[6];
     } else {
-      // Old firmware: use parameter-based defaults
       sensor_type_ = fingertip_sensor_ ? SensorType::FT_6AXIS : SensorType::NONE;
       finger_sensor_mask_ = fingertip_sensor_ ?
           static_cast<uint8_t>((1 << finger_count_) - 1) : 0x00;
@@ -299,13 +368,11 @@ void Communication::Connect() {
     if (resp_length >= 9) {
       std::cout << "  Sensor Type:      0x" << std::hex
                 << static_cast<int>(payload[5]) << std::dec << std::endl;
-      // Finger mask in binary format
       std::string mask_bin = "0b";
       for (int b = 7; b >= 0; --b) {
         mask_bin += (finger_sensor_mask_ & (1 << b)) ? '1' : '0';
       }
       std::cout << "  Finger Mask:      " << mask_bin << std::endl;
-      // Per-finger sensor status (F5 F4 F3 F2 F1 order, MSB→LSB)
       std::cout << "  Finger Sensor:    ";
       for (int i = finger_count_ - 1; i >= 0; --i) {
         bool equipped = finger_sensor_mask_ & (1 << i);
@@ -315,7 +382,6 @@ void Communication::Connect() {
       std::cout << std::endl;
     }
 
-    // Validate model
     if (model_ != actual_model_) {
       std::cerr << "========================================" << std::endl;
       std::cerr << "WARNING: Model mismatch detected!" << std::endl;
@@ -329,7 +395,6 @@ void Communication::Connect() {
     std::cout << "========================================" << std::endl;
   }
 
-  // Calculate expected response length now that sensor info is known
   expected_response_length_ = CalculateExpectedResponseLength();
 
   std::cout << "Connected to Delto Gripper (Model: " << ModelToString(actual_model_)
@@ -337,8 +402,9 @@ void Communication::Connect() {
 }
 
 void Communication::Disconnect() {
-  if (socket_.is_open()) {
-    socket_.close();
+  if (sockfd_ >= 0) {
+    ::close(sockfd_);
+    sockfd_ = -1;
     std::cout << "Disconnected from Delto Gripper" << std::endl;
   }
 }
@@ -348,20 +414,9 @@ void Communication::Disconnect() {
 // ============================================================================
 
 bool Communication::ReadFullPacket(std::vector<uint8_t>& buffer) {
-  boost::system::error_code ec;
-
   buffer.resize(expected_response_length_);
-
-  std::size_t bytes_read = boost::asio::read(
-      socket_, boost::asio::buffer(buffer.data(), expected_response_length_),
-      boost::asio::transfer_exactly(expected_response_length_), ec);
-
-  if (ec) {
-    std::cerr << "Read error: " << ec.message() << std::endl;
-    return false;
-  }
-
-  return bytes_read == static_cast<std::size_t>(expected_response_length_);
+  return RecvAll(buffer.data(),
+                 static_cast<std::size_t>(expected_response_length_), 500);
 }
 
 DeltoReceivedData Communication::GetData() {
@@ -369,10 +424,8 @@ DeltoReceivedData Communication::GetData() {
   std::vector<uint8_t> request;
 
   if (model_ == static_cast<uint16_t>(ModelType::DG3F_B)) {
-    // DG3F-B: Length(2) + CMD(1) + ID(2)
     request = {0x00, 0x05, GET_DATA_CMD, 0x01, 0x02};
   } else {
-    // New models: Length(2) + CMD(1) + ID(4) [+ optional IDs]
     request = {0x00, 0x07, GET_DATA_CMD, 0x01, 0x02, 0x03, 0x04};
 
     if (SupportsExtendedFeatures()) {
@@ -382,61 +435,28 @@ DeltoReceivedData Communication::GetData() {
       if (io_) {
         request.push_back(0x06);
       }
-      // Update length field
       request[1] = static_cast<uint8_t>(request.size());
     }
   }
 
   // Send request
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending request: " << ec.message() << std::endl;
-
-    // Try to reconnect on connection errors
-    if (ec == boost::asio::error::broken_pipe ||
-        ec == boost::asio::error::connection_reset ||
-        ec == boost::asio::error::connection_aborted) {
-      std::cerr << "Connection lost, attempting to reconnect..." << std::endl;
-      try {
-        socket_.close();
-        Connect();
-        socket_.write_some(boost::asio::buffer(request), ec);
-        if (ec) {
-          std::cerr << "Failed to send after reconnection: " << ec.message()
-                    << std::endl;
-          return DeltoReceivedData{};
-        }
-      } catch (const std::exception& e) {
-        std::cerr << "Reconnection failed: " << e.what() << std::endl;
-        return DeltoReceivedData{};
-      }
-    } else {
-      return DeltoReceivedData{};
-    }
+  if (!SendAll(request.data(), request.size())) {
+    throw std::runtime_error("Failed to send GetData request");
   }
 
   // Read response
   std::vector<uint8_t> response;
   if (!ReadFullPacket(response)) {
-    std::cerr << "Failed to read full packet" << std::endl;
-    return DeltoReceivedData{};
+    throw std::runtime_error("Failed to read full packet from gripper");
   }
 
   // Validate response
-  uint16_t length = CombineMsg(response[0], response[1]);
+  [[maybe_unused]] uint16_t length = CombineMsg(response[0], response[1]);
   uint8_t cmd = response[2];
 
   if (cmd != GET_DATA_CMD ||
       static_cast<int>(response.size()) != expected_response_length_) {
-    std::cerr << "Invalid header (CMD or LENGTH mismatch)" << std::endl;
-    std::cerr << "Expected: " << expected_response_length_
-              << ", Got: " << response.size() << std::endl;
-    std::cerr << "Received header: CMD = 0x" << std::hex << static_cast<int>(cmd)
-              << ", Length = 0x" << static_cast<int>(length) << std::dec
-              << std::endl;
-    return DeltoReceivedData{};
+    throw std::runtime_error("Invalid response: CMD or LENGTH mismatch");
   }
 
   // Parse motor data
@@ -464,7 +484,6 @@ DeltoReceivedData Communication::GetData() {
     received_data.joint[i] = raw_position * POSITION_SCALE;
     received_data.current[i] = raw_current * CURRENT_SCALE;
 
-    // New models have temperature and velocity
     if (IsNewModel()) {
       uint8_t tempL = response[base + 5];
       uint8_t tempH = response[base + 6];
@@ -477,7 +496,7 @@ DeltoReceivedData Communication::GetData() {
     }
   }
 
-  // Parse sensor data (type depends on GET_VERSION response)
+  // Parse sensor data
   if (SupportsExtendedFeatures() && fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
     size_t sensor_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
     int bytes_per_finger = GetSensorBytesPerFinger();
@@ -486,15 +505,11 @@ DeltoReceivedData Communication::GetData() {
       case SensorType::FT_6AXIS:
       case SensorType::FT_3AXIS:
       case SensorType::FT_4AXIS: {
-        // F/T sensor: 12 bytes/finger (6 axes × 2 bytes)
-        // 전체 슬롯 전송, 비활성 손가락은 0
         received_data.fingertip_sensor.resize(finger_count_ * 6);
-
         for (int finger = 0; finger < finger_count_; finger++) {
           for (int axis = 0; axis < 6; axis++) {
             size_t offset = sensor_base + finger * bytes_per_finger + axis * 2;
             int16_t raw_value = CombineMsg(response[offset], response[offset + 1]);
-
             if (axis < 3) {
               received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
             } else {
@@ -505,8 +520,6 @@ DeltoReceivedData Communication::GetData() {
         break;
       }
       case SensorType::TACTILE_M: {
-        // Tactile M: 15 bytes/finger (3×5, uint8)
-        // 전체 슬롯 전송, 비활성 손가락은 0
         for (int finger = 0; finger < finger_count_; finger++) {
           std::vector<uint8_t> cells(15);
           size_t offset = sensor_base + finger * bytes_per_finger;
@@ -518,8 +531,6 @@ DeltoReceivedData Communication::GetData() {
         break;
       }
       case SensorType::TACTILE_S: {
-        // Tactile S: 36 bytes/finger (3×6, uint16 Big-Endian)
-        // 전체 슬롯 전송, 비활성 손가락은 0
         for (int finger = 0; finger < finger_count_; finger++) {
           std::vector<uint16_t> cells(18);
           size_t offset = sensor_base + finger * bytes_per_finger;
@@ -536,7 +547,7 @@ DeltoReceivedData Communication::GetData() {
     }
   }
 
-  // Parse GPIO data (only for models with GPIO enabled)
+  // Parse GPIO data
   if (SupportsExtendedFeatures() && io_) {
     size_t gpio_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
     if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
@@ -553,44 +564,21 @@ DeltoReceivedData Communication::GetData() {
 }
 
 void Communication::SendDuty(std::vector<int>& duty) {
-  std::vector<uint8_t> tcp_data_send;
+  uint16_t total_packet_size = 3 + motor_count_ * 3;
+  std::vector<uint8_t> tcp_data_send(total_packet_size);
 
-  uint16_t total_packet_size = 3 + motor_count_ * 3;  // Header + ID(1) + Duty(2) per motor
-  tcp_data_send.resize(total_packet_size);
-
-  tcp_data_send[0] = (total_packet_size >> 8) & 0xFF;  // Length_h
-  tcp_data_send[1] = (total_packet_size) & 0xFF;       // Length_l
-  tcp_data_send[2] = SET_DUTY_CMD;                     // CMD
+  tcp_data_send[0] = (total_packet_size >> 8) & 0xFF;
+  tcp_data_send[1] = (total_packet_size) & 0xFF;
+  tcp_data_send[2] = SET_DUTY_CMD;
 
   for (int i = 0; i < motor_count_; ++i) {
-    tcp_data_send[3 + i * 3] = i + 1;                  // ID
-    tcp_data_send[4 + i * 3] = (duty[i] >> 8) & 0xFF;  // High byte
-    tcp_data_send[5 + i * 3] = (duty[i]) & 0xFF;       // Low byte
+    tcp_data_send[3 + i * 3] = i + 1;
+    tcp_data_send[4 + i * 3] = (duty[i] >> 8) & 0xFF;
+    tcp_data_send[5 + i * 3] = (duty[i]) & 0xFF;
   }
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(tcp_data_send), ec);
-
-  if (ec) {
-    std::cerr << "Error sending duty: " << ec.message() << std::endl;
-
-    // Try to reconnect on connection errors
-    if (ec == boost::asio::error::broken_pipe ||
-        ec == boost::asio::error::connection_reset ||
-        ec == boost::asio::error::connection_aborted) {
-      std::cerr << "Connection lost, attempting to reconnect..." << std::endl;
-      try {
-        socket_.close();
-        Connect();
-        socket_.write_some(boost::asio::buffer(tcp_data_send), ec);
-        if (ec) {
-          std::cerr << "Failed to send after reconnection: " << ec.message()
-                    << std::endl;
-        }
-      } catch (const std::exception& e) {
-        std::cerr << "Reconnection failed: " << e.what() << std::endl;
-      }
-    }
+  if (!SendAll(tcp_data_send.data(), tcp_data_send.size())) {
+    throw std::runtime_error("Failed to send duty command");
   }
 }
 
@@ -604,19 +592,15 @@ void Communication::SetGPIO(bool output1, bool output2, bool output3) {
     return;
   }
 
-  std::array<uint8_t, 6> request;
-  request[0] = 0x00;                       // Length_h
-  request[1] = 0x06;                       // Length_l
-  request[2] = SET_GPIO_CMD;               // CMD 0x06
-  request[3] = output1 ? 0x01 : 0x00;      // Output 1
-  request[4] = output2 ? 0x01 : 0x00;      // Output 2
-  request[5] = output3 ? 0x01 : 0x00;      // Output 3
+  uint8_t request[6] = {
+    0x00, 0x06, SET_GPIO_CMD,
+    static_cast<uint8_t>(output1 ? 0x01 : 0x00),
+    static_cast<uint8_t>(output2 ? 0x01 : 0x00),
+    static_cast<uint8_t>(output3 ? 0x01 : 0x00)
+  };
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending GPIO command: " << ec.message() << std::endl;
+  if (!SendAll(request, 6)) {
+    std::cerr << "Error sending GPIO command" << std::endl;
   }
 }
 
@@ -630,17 +614,10 @@ void Communication::SetFTSensorOffset() {
     return;
   }
 
-  std::array<uint8_t, 3> request;
-  request[0] = 0x00;                       // Length_h
-  request[1] = 0x03;                       // Length_l
-  request[2] = SET_FT_SENSOR_OFFSET_CMD;   // CMD 0x0B
+  uint8_t request[3] = {0x00, 0x03, SET_FT_SENSOR_OFFSET_CMD};
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending F/T sensor offset command: " << ec.message()
-              << std::endl;
+  if (!SendAll(request, 3)) {
+    std::cerr << "Error sending F/T sensor offset command" << std::endl;
   }
 }
 
