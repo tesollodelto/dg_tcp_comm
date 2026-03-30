@@ -60,7 +60,7 @@ enum class SensorType : uint8_t {
   FT_6AXIS  = 0x01,   // 6 Axis Force/Torque, 12byte/finger
   FT_3AXIS  = 0x02,   // 3 Axis (x,y,z, nc, nc, nc),  12byte/finger
   TACTILE_M = 0x03,   // 3x5, 1byte/cell, 15byte/finger
-  FT_4AXIS  = 0x04,   // 4 Axis (x,y,z, nc, nc, rz), 12byte/finger 
+  FT_4AXIS  = 0x04,   // 4 Axis (x,y,z, nc, nc, tz), 12byte/finger 
   TACTILE_S = 0x05,   // 3x6, 2byte/cell, 36byte/finger
 };
 

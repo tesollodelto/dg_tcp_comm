@@ -117,13 +117,7 @@ int Communication::GetSensorBytesPerFinger() const {
 }
 
 int Communication::GetSensorFingerCount() const {
-  int count = 0;
-  for (int i = 0; i < finger_count_; i++) {
-    if (finger_sensor_mask_ & (1 << i)) {
-      count++;
-    }
-  }
-  return count;
+  return finger_count_;  // 전체 손가락 슬롯 전송 (비활성은 0)
 }
 
 int16_t Communication::CalculateExpectedResponseLength() {
@@ -305,8 +299,20 @@ void Communication::Connect() {
     if (resp_length >= 9) {
       std::cout << "  Sensor Type:      0x" << std::hex
                 << static_cast<int>(payload[5]) << std::dec << std::endl;
-      std::cout << "  Finger Mask:      0x" << std::hex
-                << static_cast<int>(finger_sensor_mask_) << std::dec << std::endl;
+      // Finger mask in binary format
+      std::string mask_bin = "0b";
+      for (int b = 7; b >= 0; --b) {
+        mask_bin += (finger_sensor_mask_ & (1 << b)) ? '1' : '0';
+      }
+      std::cout << "  Finger Mask:      " << mask_bin << std::endl;
+      // Per-finger sensor status (F5 F4 F3 F2 F1 order, MSB→LSB)
+      std::cout << "  Finger Sensor:    ";
+      for (int i = finger_count_ - 1; i >= 0; --i) {
+        bool equipped = finger_sensor_mask_ & (1 << i);
+        std::cout << "F" << (i + 1) << ":" << (equipped ? "ON" : "--");
+        if (i > 0) std::cout << " ";
+      }
+      std::cout << std::endl;
     }
 
     // Validate model
@@ -481,54 +487,47 @@ DeltoReceivedData Communication::GetData() {
       case SensorType::FT_3AXIS:
       case SensorType::FT_4AXIS: {
         // F/T sensor: 12 bytes/finger (6 axes × 2 bytes)
-        int sensor_fingers = GetSensorFingerCount();
-        received_data.fingertip_sensor.resize(sensor_fingers * 6);
+        // 전체 슬롯 전송, 비활성 손가락은 0
+        received_data.fingertip_sensor.resize(finger_count_ * 6);
 
-        int fi = 0;
         for (int finger = 0; finger < finger_count_; finger++) {
-          if (!(finger_sensor_mask_ & (1 << finger))) continue;
           for (int axis = 0; axis < 6; axis++) {
-            size_t offset = sensor_base + fi * bytes_per_finger + axis * 2;
+            size_t offset = sensor_base + finger * bytes_per_finger + axis * 2;
             int16_t raw_value = CombineMsg(response[offset], response[offset + 1]);
 
             if (axis < 3) {
-              received_data.fingertip_sensor[fi * 6 + axis] = raw_value * 0.1;
+              received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
             } else {
-              received_data.fingertip_sensor[fi * 6 + axis] = raw_value * 0.001;
+              received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.001;
             }
           }
-          fi++;
         }
         break;
       }
       case SensorType::TACTILE_M: {
         // Tactile M: 15 bytes/finger (3×5, uint8)
-        int fi = 0;
+        // 전체 슬롯 전송, 비활성 손가락은 0
         for (int finger = 0; finger < finger_count_; finger++) {
-          if (!(finger_sensor_mask_ & (1 << finger))) continue;
           std::vector<uint8_t> cells(15);
-          size_t offset = sensor_base + fi * bytes_per_finger;
+          size_t offset = sensor_base + finger * bytes_per_finger;
           for (int j = 0; j < 15; j++) {
             cells[j] = response[offset + j];
           }
           received_data.tactile_m.push_back(std::move(cells));
-          fi++;
         }
         break;
       }
       case SensorType::TACTILE_S: {
         // Tactile S: 36 bytes/finger (3×6, uint16 Big-Endian)
-        int fi = 0;
+        // 전체 슬롯 전송, 비활성 손가락은 0
         for (int finger = 0; finger < finger_count_; finger++) {
-          if (!(finger_sensor_mask_ & (1 << finger))) continue;
           std::vector<uint16_t> cells(18);
-          size_t offset = sensor_base + fi * bytes_per_finger;
+          size_t offset = sensor_base + finger * bytes_per_finger;
           for (int j = 0; j < 18; j++) {
             cells[j] = (static_cast<uint16_t>(response[offset + j * 2]) << 8) |
                         response[offset + j * 2 + 1];
           }
           received_data.tactile_s.push_back(std::move(cells));
-          fi++;
         }
         break;
       }
