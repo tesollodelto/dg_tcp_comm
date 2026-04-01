@@ -144,9 +144,16 @@ class Communication {
   static constexpr uint8_t SET_FT_SENSOR_OFFSET_CMD = 0x0B;
 
   static constexpr std::size_t HEADER_SIZE = 3;
+
+  // 0.1 deg to radian: 0.1 * (pi/180) = pi/1800
   static constexpr double POSITION_SCALE = (M_PI / 1800.0);
+  
+  // mA to mA (no scaling, but keep for clarity and future adjustments)
   static constexpr double CURRENT_SCALE = 1.0;
-  static constexpr double VELOCITY_SCALE = (M_PI / 1800.0);
+
+  // 1rpm to rad/s: (2 * pi) / 60 = pi / 30, 
+  static constexpr double VELOCITY_SCALE = (M_PI / 30.0);
+  
   static constexpr int GPIO_SIZE = 4;
 
   // Helper functions

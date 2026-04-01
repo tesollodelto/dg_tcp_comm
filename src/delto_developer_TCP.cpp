@@ -492,7 +492,7 @@ DeltoReceivedData Communication::GetData() {
 
       int8_t raw_vel = ConvertByte(response[base + 7]);
       received_data.velocity[i] =
-          static_cast<double>(raw_vel) * VELOCITY_SCALE * -1;
+          static_cast<double>(raw_vel) * VELOCITY_SCALE;
     }
   }
 
