@@ -55,6 +55,17 @@ enum class ModelType : uint16_t {
   DG5F_R_S15 = 0x5F44,  // DG-5F RIGHT S15
 };
 
+enum class DataCode: uint8_t {
+  JOINT      = 0x01,
+  CURRENT    = 0x02,
+  TEMPERATURE= 0x03,
+  VELOCITY   = 0x04,
+  FINGERTIP_SENSOR = 0x05,
+  GPIO       = 0x06,
+  MODULE_ERROR = 0x07,
+};
+
+
 enum class SensorType : uint8_t {
   NONE      = 0x00,
   FT_6AXIS  = 0x01,   // 6 Axis Force/Torque, 12byte/finger
@@ -143,6 +154,7 @@ class Communication {
   static constexpr uint8_t GET_VERSION_CMD = 0x08;
   static constexpr uint8_t SET_FT_SENSOR_OFFSET_CMD = 0x0B;
 
+  // length (2 bytes) + command (1 byte) + payload (variable) 
   static constexpr std::size_t HEADER_SIZE = 3;
 
   // 0.1 deg to radian: 0.1 * (pi/180) = pi/1800

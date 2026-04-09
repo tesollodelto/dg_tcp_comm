@@ -420,20 +420,28 @@ bool Communication::ReadFullPacket(std::vector<uint8_t>& buffer) {
 }
 
 DeltoReceivedData Communication::GetData() {
+ 
   // Build request packet
+  // JOINT            = 0x01,
+  // CURRENT          = 0x02,
+  // TEMPERATURE      = 0x03,
+  // VELOCITY         = 0x04,
+  // FINGERTIP_SENSOR = 0x05,
+  // GPIO             = 0x06,
+  // MODULE_ERROR     = 0x07,
   std::vector<uint8_t> request;
 
   if (model_ == static_cast<uint16_t>(ModelType::DG3F_B)) {
-    request = {0x00, 0x05, GET_DATA_CMD, 0x01, 0x02};
+    request = {0x00, 0x05, GET_DATA_CMD, static_cast<uint8_t>(DataCode::JOINT), static_cast<uint8_t>(DataCode::CURRENT)};
   } else {
-    request = {0x00, 0x07, GET_DATA_CMD, 0x01, 0x02, 0x03, 0x04};
+    request = {0x00, 0x07, GET_DATA_CMD, static_cast<uint8_t>(DataCode::JOINT), static_cast<uint8_t>(DataCode::CURRENT), static_cast<uint8_t>(DataCode::TEMPERATURE), static_cast<uint8_t>(DataCode::VELOCITY)};
 
     if (SupportsExtendedFeatures()) {
       if (fingertip_sensor_) {
-        request.push_back(0x05);
+        request.push_back(static_cast<uint8_t>(DataCode::FINGERTIP_SENSOR));
       }
       if (io_) {
-        request.push_back(0x06);
+        request.push_back(static_cast<uint8_t>(DataCode::GPIO));
       }
       request[1] = static_cast<uint8_t>(request.size());
     }
@@ -510,6 +518,8 @@ DeltoReceivedData Communication::GetData() {
           for (int axis = 0; axis < 6; axis++) {
             size_t offset = sensor_base + finger * bytes_per_finger + axis * 2;
             int16_t raw_value = CombineMsg(response[offset], response[offset + 1]);
+            
+            // 0.1N to N for force, 1 mNm to Nm for torque
             if (axis < 3) {
               received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
             } else {
