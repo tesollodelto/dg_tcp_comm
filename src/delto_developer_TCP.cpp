@@ -489,7 +489,16 @@ DeltoReceivedData Communication::GetData() {
     int16_t raw_position = CombineMsg(posL, posH);
     int16_t raw_current = CombineMsg(curL, curH);
 
+    if(actual_model_ == static_cast<uint16_t>(ModelType::DG5F_L_S) 
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_R_S)
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_L_S15)
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_R_S15))
+  {
+    received_data.joint[i] = raw_position * POSITION_SCALE_S;
+  } else {
     received_data.joint[i] = raw_position * POSITION_SCALE;
+  }
+  
     received_data.current[i] = raw_current * CURRENT_SCALE;
 
     if (IsNewModel()) {

@@ -158,7 +158,9 @@ class Communication {
   static constexpr std::size_t HEADER_SIZE = 3;
 
   // 0.1 deg to radian: 0.1 * (pi/180) = pi/1800
+  // S Model 0.01 deg to radian 0.01 * (pi/180) = pi/18000
   static constexpr double POSITION_SCALE = (M_PI / 1800.0);
+  static constexpr double POSITION_SCALE_S = (M_PI / 18000.0);
   
   // mA to mA (no scaling, but keep for clarity and future adjustments)
   static constexpr double CURRENT_SCALE = 1.0;
